@@ -62,7 +62,7 @@ public struct ChatTheme {
         public var recordDot: Color
 
         public var myMessageTime: Color
-        public var frientMessageTime: Color
+        public var friendMessageTime: Color
 
         public var timeCapsuleBackground: Color
         public var timeCapsuleForeground: Color
@@ -84,7 +84,7 @@ public struct ChatTheme {
             textMediaPicker: Color = Color(hex: "818C99"),
             recordDot: Color = Color(hex: "F62121"),
             myMessageTime: Color = .white.opacity(0.4),
-            frientMessageTime: Color = .black.opacity(0.4),
+            friendMessageTime: Color = .black.opacity(0.4),
             timeCapsuleBackground: Color = .black.opacity(0.4),
             timeCapsuleForeground: Color = .white
         ) {
@@ -104,7 +104,7 @@ public struct ChatTheme {
             self.textMediaPicker = textMediaPicker
             self.recordDot = recordDot
             self.myMessageTime = myMessageTime
-            self.frientMessageTime = frientMessageTime
+            self.friendMessageTime = friendMessageTime
             self.timeCapsuleBackground = timeCapsuleBackground
             self.timeCapsuleForeground = timeCapsuleForeground
         }
