@@ -11,6 +11,70 @@ public extension Notification.Name {
     static let onScrollToBottom = Notification.Name("onScrollToBottom")
 }
 
+final class CustomUITableView: UITableView {
+    private var didInitiallyScrollToBottom = false
+    @Binding var isScrolledToBottom: Bool
+
+    init(isScrolledToBottom: Binding<Bool>) {
+        self._isScrolledToBottom = isScrolledToBottom
+        super.init(frame: .zero, style: .grouped)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        // Initial correction on appear
+        let yOffset = max(contentSize.height - frame.height, 0)
+        let numberOfSections = numberOfSections
+        if !didInitiallyScrollToBottom, numberOfSections > 0, yOffset > 0 {
+            didInitiallyScrollToBottom = true
+            scrollToBottom(animated: false)
+        }
+    }
+
+    override func reloadData() {
+        withScrollManagement {
+            super.reloadData()
+        }
+    }
+
+    fileprivate func withScrollManagement(_ perform: () -> Void) {
+        let isScrolledToBottom = self.isScrolledToBottom
+
+        perform()
+
+        if isScrolledToBottom {
+            layoutIfNeeded()
+            DispatchQueue.main.async {
+                self.scrollToBottom(animated: true)
+            }
+        }
+    }
+
+    func scrollToBottom(animated: Bool = true) {
+        let lastSection = numberOfSections - 1
+        guard lastSection >= 0 else { return }
+        let rows = numberOfRows(inSection: lastSection) - 1
+        guard rows >= 0 else { return }
+
+        guard contentOffset.y.distance(to: self.contentSize.height - self.frame.height) > 32 else {
+            // Already at the bottom
+            return
+        }
+
+        self.scrollToRow(
+            at: IndexPath(
+                row: rows,
+                section: lastSection
+            ),
+            at: .middle,
+            animated: animated
+        )
+    }
+}
+
 struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
 
     typealias MessageBuilderClosure = ChatView<MessageContent, InputView, DefaultMessageMenuAction>.MessageBuilderClosure
@@ -48,40 +112,40 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
     @State private var updateSemaphore = DispatchSemaphore(value: 1)
     @State private var tableSemaphore = DispatchSemaphore(value: 0)
 
-    func makeUIView(context: Context) -> UITableView {
-        let tableView = UITableView(frame: .zero, style: .grouped)
+    func makeUIView(context: Context) -> CustomUITableView {
+        let tableView = CustomUITableView(isScrolledToBottom: context.coordinator.$isScrolledToBottom)
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.separatorStyle = .none
         tableView.dataSource = context.coordinator
         tableView.delegate = context.coordinator
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "Cell")
-        tableView.transform = CGAffineTransform(rotationAngle: (type == .conversation ? .pi : 0))
-
-        tableView.showsVerticalScrollIndicator = false
+        tableView.showsVerticalScrollIndicator = true
+        tableView.showsHorizontalScrollIndicator = false
+        tableView.fillerRowHeight = 0
         tableView.estimatedSectionHeaderHeight = 1
         tableView.estimatedSectionFooterHeight = UITableView.automaticDimension
         tableView.backgroundColor = UIColor(theme.colors.mainBackground)
         tableView.scrollsToTop = false
         tableView.isScrollEnabled = isScrollEnabled
 
-        NotificationCenter.default.addObserver(forName: .onScrollToBottom, object: nil, queue: nil) { _ in
-            DispatchQueue.main.async {
-                if !context.coordinator.sections.isEmpty {
-                    tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .bottom, animated: true)
-                }
-            }
+        NotificationCenter.default.addObserver(
+            forName: .onScrollToBottom,
+            object: nil,
+            queue: .main
+        ) { _ in
+            tableView.scrollToBottom()
         }
 
         DispatchQueue.main.async {
             shouldScrollToTop = {
-                tableView.contentOffset = CGPoint(x: 0, y: tableView.contentSize.height - tableView.frame.height)
+                tableView.contentOffset = CGPoint(x: 0, y: 0)
             }
         }
 
         return tableView
     }
 
-    func updateUIView(_ tableView: UITableView, context: Context) {
+    func updateUIView(_ tableView: CustomUITableView, context: Context) {
         if !isScrollEnabled {
             DispatchQueue.main.async {
                 tableContentHeight = tableView.contentSize.height
@@ -134,76 +198,84 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
             //print("operations insert:\n", insertOperations.map { $0.description })
 
             DispatchQueue.main.async {
-                tableView.performBatchUpdates {
-                    // step 2
-                    // delete sections and rows if necessary
-                    //print("2 apply delete")
-                    context.coordinator.sections = appliedDeletes
-                    for operation in deleteOperations {
-                        applyOperation(operation, tableView: tableView)
+                tableView.withScrollManagement {
+                    tableView.performBatchUpdates {
+                        // step 2
+                        // delete sections and rows if necessary
+                        //print("2 apply delete")
+                        context.coordinator.sections = appliedDeletes
+                        for operation in deleteOperations {
+                            applyOperation(operation, tableView: tableView)
+                        }
+                    } completion: { _ in
+                        tableSemaphore.signal()
+                        //print("2 finished delete")
                     }
-                } completion: { _ in
-                    tableSemaphore.signal()
-                    //print("2 finished delete")
                 }
             }
             tableSemaphore.wait()
 
             DispatchQueue.main.async {
-                tableView.performBatchUpdates {
-                    // step 3
-                    // swap places for rows that moved inside the table
-                    // (example of how this happens. send two messages: first m1, then m2. if m2 is delivered to server faster, then it should jump above m1 even though it was sent later)
-                    //print("3 apply swaps")
-                    context.coordinator.sections = appliedDeletesSwapsAndEdits // NOTE: this array already contains necessary edits, but won't be a problem for appplying swaps
-                    for operation in swapOperations {
-                        applyOperation(operation, tableView: tableView)
+                tableView.withScrollManagement {
+                    tableView.performBatchUpdates {
+                        // step 3
+                        // swap places for rows that moved inside the table
+                        // (example of how this happens. send two messages: first m1, then m2. if m2 is delivered to server faster, then it should jump above m1 even though it was sent later)
+                        //print("3 apply swaps")
+                        context.coordinator.sections = appliedDeletesSwapsAndEdits // NOTE: this array already contains necessary edits, but won't be a problem for appplying swaps
+                        for operation in swapOperations {
+                            applyOperation(operation, tableView: tableView)
+                        }
+                    } completion: { _ in
+                        tableSemaphore.signal()
+                        //print("3 finished swaps")
                     }
-                } completion: { _ in
-                    tableSemaphore.signal()
-                    //print("3 finished swaps")
                 }
             }
             tableSemaphore.wait()
 
             DispatchQueue.main.async {
                 UIView.setAnimationsEnabled(false)
-                tableView.performBatchUpdates {
-                    // step 4
-                    // check only sections that are already in the table for existing rows that changed and apply only them to table's dataSource without animation
-                    //print("4 apply edits")
-                    context.coordinator.sections = appliedDeletesSwapsAndEdits
+                tableView.withScrollManagement {
+                    tableView.performBatchUpdates {
+                        // step 4
+                        // check only sections that are already in the table for existing rows that changed and apply only them to table's dataSource without animation
+                        //print("4 apply edits")
+                        context.coordinator.sections = appliedDeletesSwapsAndEdits
 
-                    for operation in editOperations {
-                        applyOperation(operation, tableView: tableView)
+                        for operation in editOperations {
+                            applyOperation(operation, tableView: tableView)
+                        }
+
+                    } completion: { _ in
+                        tableSemaphore.signal()
+                        UIView.setAnimationsEnabled(true)
+                        //print("4 finished edits")
                     }
-
-                } completion: { _ in
-                    tableSemaphore.signal()
-                    UIView.setAnimationsEnabled(true)
-                    //print("4 finished edits")
                 }
             }
             tableSemaphore.wait()
 
             if isScrolledToBottom || isScrolledToTop {
-                DispatchQueue.main.sync {
-                    // step 5
-                    // apply the rest of the changes to table's dataSource, i.e. inserts
-                    //print("5 apply inserts")
-                    context.coordinator.sections = sections
+                DispatchQueue.main.async {
+                    tableView.withScrollManagement {
+                        // step 5
+                        // apply the rest of the changes to table's dataSource, i.e. inserts
+                        //print("5 apply inserts")
+                        context.coordinator.sections = sections
 
-                    tableView.beginUpdates()
-                    for operation in insertOperations {
-                        applyOperation(operation, tableView: tableView)
+                        tableView.beginUpdates()
+                        for operation in insertOperations {
+                            applyOperation(operation, tableView: tableView)
+                        }
+                        tableView.endUpdates()
+
+                        if !isScrollEnabled {
+                            tableContentHeight = tableView.contentSize.height
+                        }
+
+                        updateSemaphore.signal()
                     }
-                    tableView.endUpdates()
-
-                    if !isScrollEnabled {
-                        tableContentHeight = tableView.contentSize.height
-                    }
-
-                    updateSemaphore.signal()
                 }
             } else {
                 updateSemaphore.signal()
@@ -240,14 +312,13 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
         }
     }
 
-    func applyOperation(_ operation: Operation, tableView: UITableView) {
+    func applyOperation(_ operation: Operation, tableView: CustomUITableView) {
         let animation: UITableView.RowAnimation = .top
         switch operation {
         case .deleteSection(let section):
             tableView.deleteSections([section], with: animation)
         case .insertSection(let section):
             tableView.insertSections([section], with: animation)
-
         case .delete(let section, let row):
             tableView.deleteRows(at: [IndexPath(row: row, section: section)], with: animation)
         case .insert(let section, let row):
@@ -431,18 +502,18 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
         }
 
         func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-            sections[section].rows.count
+            return sections[section].rows.count
         }
 
         func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
-            if type == .comments {
+            if type == .conversation {
                 return sectionHeaderView(section)
             }
             return nil
         }
 
         func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? {
-            if type == .conversation {
+            if type == .comments {
                 return sectionHeaderView(section)
             }
             return nil
@@ -452,14 +523,14 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
             if !showDateHeaders && (section != 0 || mainHeaderBuilder == nil) {
                 return 0.1
             }
-            return type == .conversation ? 0.1 : UITableView.automaticDimension
+            return type == .comments ? 0.1 : UITableView.automaticDimension
         }
 
         func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat {
             if !showDateHeaders && (section != 0 || mainHeaderBuilder == nil) {
                 return 0.1
             }
-            return type == .conversation ? UITableView.automaticDimension : 0.1
+            return type == .comments ? UITableView.automaticDimension : 0.1
         }
 
         func sectionHeaderView(_ section: Int) -> UIView? {
@@ -469,7 +540,6 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
 
             let header = UIHostingController(rootView:
                 sectionHeaderViewBuilder(section)
-                    .rotationEffect(Angle(degrees: (type == .conversation ? 180 : 0)))
             ).view
             header?.backgroundColor = UIColor(chatTheme.colors.mainBackground)
             return header
@@ -513,8 +583,6 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
                 ChatMessageView(viewModel: viewModel, messageBuilder: messageBuilder, row: row, chatType: type, avatarSize: avatarSize, tapAvatarClosure: tapAvatarClosure, messageUseMarkdown: messageUseMarkdown, isDisplayingMessageMenu: false, showMessageTimeView: showMessageTimeView, messageFont: messageFont)
                     .transition(.scale)
                     .background(MessageMenuPreferenceViewSetter(id: row.id))
-                    .rotationEffect(Angle(degrees: (type == .conversation ? 180 : 0)))
-                    .onTapGesture { }
                     .applyIf(showMessageMenuOnLongPress) {
                         $0.onLongPressGesture {
                             self.viewModel.messageMenuRow = row
@@ -539,8 +607,8 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            isScrolledToBottom = scrollView.contentOffset.y <= 0
-            isScrolledToTop = scrollView.contentOffset.y >= scrollView.contentSize.height - scrollView.frame.height - 1
+            self.isScrolledToBottom = scrollView.contentOffset.y >= scrollView.contentSize.height - scrollView.frame.height - (scrollView.contentInset.bottom + 32)
+            self.isScrolledToTop = scrollView.contentOffset.y <= 0
         }
     }
 
@@ -553,7 +621,7 @@ struct UIList<MessageContent: View, InputView: View>: UIViewRepresentable {
 
     func formatSections(_ sections: [MessagesSection]) -> String {
         var res = "{\n"
-        for section in sections.reversed() {
+        for section in sections{
             res += String("\t{\n")
             for row in section.rows {
                 res += String("\t\t\(formatRow(row))\n")

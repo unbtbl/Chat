@@ -18,7 +18,7 @@ final class InputViewModel: ObservableObject {
     @Published var showActivityIndicator = false
 
     var recordingPlayer: RecordingPlayer?
-    var didSendMessage: ((DraftMessage) -> Void)?
+    var didSendMessage: (@MainActor (DraftMessage) -> Void)?
 
     private var recorder = Recorder()
 
@@ -225,11 +225,13 @@ private extension InputViewModel {
                     createdAt: Date()
                 )
             }
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] draft in
-                self?.didSendMessage?(draft)
-                DispatchQueue.main.async { [weak self] in
-                    self?.showActivityIndicator = false
-                    self?.reset()
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    self.didSendMessage?(draft)
+                    self.showActivityIndicator = false
+                    self.reset()
                 }
             }
     }
